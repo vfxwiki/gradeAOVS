@@ -1,1 +1,749 @@
 
+set cut_paste_input [stack 0]
+version 15.0 v4
+push $cut_paste_input
+Group {
+ name GradeAOVS
+ help "Colour correct the CG beauty using the secondary(aov) passes.with a subtractive process.\nto be used when:\n * the CG is good and only a few passes need adjusting\n * the secondaries don't add up to the beauty\n * rgb saturation (luminance mix on)\n * rgb contrast (with pivot)\n * matting with external mask input or main channel input or both with an operation.\n The order of correction is: Grade Node>Contrast Node>Saturation."
+ tile_color 0x8aa7dbff
+ selected true
+ xpos -1696
+ ypos 774
+ addUserKnob {20 User l GradeAOVS}
+ addUserKnob {22 pick_layers l " pick AOVS:" -STARTLINE T "import nuke\nfrom PySide2.QtCore import Qt\nfrom PySide2.QtWidgets import *\nfrom collections import Counter\n\nclass Grade_AOVS(QWidget):\n    def __init__(self):\n        super(Grade_AOVS, self).__init__()\n\n        #Set modes\n        self.group = nuke.thisNode()\n        mode_node = self.group.node('Switch3')\n        mode_node\['contact'].setValue(0)\n        mode_node\['solo'].setValue(0)\n        mode_node\['mute'].setValue(0)\n        \n        # Initialize UI\n        self.setWindowTitle(\"Layer Selector\")\n        self.setFixedSize(440, 600)  # Set panel width to 200 pixels and height to 600 pixels\n        \n        # Get layers from the current Nuke script and filter unwanted layers\n        self.layers = \[layer for layer in nuke.layers(nuke.thisNode()) if not self.filter_layer(layer)]\n    \n        # Layout\n        layout = QVBoxLayout()\n        \n        # Table\n        self.table = QTableWidget()\n        self.table.setColumnCount(3)  # 3 columns: Layer name, AOV (Checkbox 1), Divide (Checkbox 2)\n        self.table.setHorizontalHeaderLabels(\[\"Layer\", \"AOV\", \"Divide\"])\n        self.table.verticalHeader().setVisible(False)\n        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)  # Make table non-editable\n        for layer in self.layers:\n            row_position = self.table.rowCount()\n            self.table.insertRow(row_position)\n            self.table.setItem(row_position, 0, QTableWidgetItem(layer))\n            aov_checkbox = QCheckBox()\n            divide_checkbox = QCheckBox()\n            divide_checkbox.setCheckable(True)\n            divide_checkbox.toggled.connect(lambda state, cb=divide_checkbox: self.handle_divide_checkbox(cb))\n            self.table.setCellWidget(row_position, 1, aov_checkbox)\n            self.table.setCellWidget(row_position, 2, divide_checkbox)\n        layout.addWidget(self.table)\n        \n        # Submit button\n        self.selected_aovs = \[]\n        self.selected_divides = \[]\n        self.submit_button = QPushButton(\"Submit\")\n        self.submit_button.clicked.connect(self.submit)\n        layout.addWidget(self.submit_button)\n        self.setLayout(layout)\n\n        # build Adds inside group\n        self.shuffle_add_group = ''\n        \n        \n    def filter_layer(self, layer_name):\n        unwanted_layers = \['deep', 'cutout', 'sample', 'mask', 'mask_splinewarp', 'mask_planartrack',\n                           'rotopaint_mask', 'dispartityR', 'disparityL', 'disparity', 'backward',\n                           'forward', 'motion', 'depth', 'alpha', 'rgba', 'rgb', 'N', 'P', 'Pref']\n        return any(unwanted in layer_name.lower() for unwanted in unwanted_layers) or layer_name.startswith('ID')\n        \n    def handle_divide_checkbox(self, checkbox):\n        # Ensure only one checkbox can be checked in each row\n        if checkbox.isChecked():\n            for row in range(self.table.rowCount()):\n                if self.table.cellWidget(row, 2) != checkbox:\n                    self.table.cellWidget(row, 2).setChecked(False)\n        \n    def submit(self):\n\n        for row in range(self.table.rowCount()):\n            layer_item = self.table.item(row, 0)\n            aov_checkbox = self.table.cellWidget(row, 1)\n            divide_checkbox = self.table.cellWidget(row, 2)\n            if aov_checkbox.isChecked():\n                self.selected_aovs.append(layer_item.text())\n            if divide_checkbox.isChecked():\n                self.selected_divides.append(layer_item.text())\n        if any(count > 1 for count in Counter(self.selected_aovs).values()):\n            nuke.message('err.. please change your selection as the single Divide AOV and Layer AOV cannot be selected togethe. thx..  ')\n            self.activateWindow()\n            self.raise_()\n        else:\n            if self.selected_divides == \[]:\n                result_div = ''\n            else:\n                result_div = \" (\"+', '.join(str(item) for item in self.selected_divides)+\")\"\n            result = \"<b>\"+', '.join(str(item) for item in self.selected_aovs)+ result_div\n            self.group\['layers_used'].setValue(result)\n            # Close the panel\n            self.close()\n            # build AOV inside groups\n            self.shuffle_add_group = self.group.node('AddLayersAndDiv')\n            self.create_nodes('div')\n            self.shuffle_add_group = self.group.node('AddLayers')\n            self.create_nodes('add')\n            self.shuffle_add_group = self.group.node('CopyGradedAOV')\n            self.create_nodes('copy')\n\n            # disable Divides if not selected #set base colour\n            if self.selected_divides == \[]:\n                self.group.knob('divide_by_texture').setEnabled(False)\n                self.group.knob('divide_by_texture').setValue(False)\n                self.group.node('ShuffleBaseColour')\['in'].setValue('none')\n            else:\n                self.group.knob('divide_by_texture').setEnabled(True)\n                self.group.knob('divide_by_texture').setValue(True)\n                self.group.node('ShuffleBaseColour')\['in'].setValue(self.selected_divides\[0])\n            \n                \n\n    def create_nodes(self,mode):\n        \n        with self.shuffle_add_group:\n            #delete old nodes\n            input_node = self.shuffle_add_group.node('Input1')\n            input2_node = self.shuffle_add_group.node('Input2')\n            output_node = self.shuffle_add_group.node('Output1')\n            # Get the 'AddBase' node if it exists\n            add_base_node = self.shuffle_add_group.node('AddBase')\n            # Get the 'shuffle_start' node if it exists\n            shuffle_start_node = self.shuffle_add_group.node('ShuffleCopyStart')\n            # Get all nodes inside the group\n            nodes_inside_group = self.shuffle_add_group.nodes()\n            # Iterate through each node and delete it if it's not input, output, or 'AddBase'\n            for node in nodes_inside_group:\n                if node not in \[input_node, input2_node, output_node, add_base_node, shuffle_start_node]:\n                    nuke.delete(node)\n\n            # Split the layers list string into individual layer names\n            layer_names = \[layer.strip() for layer in self.selected_aovs]\n            \n            # Get the node position for placing shuffle nodes\n            if mode == 'div':\n                top_connect_node = self.shuffle_add_group.node('AddBase')\n            elif mode == 'add':\n                top_connect_node = input_node\n            elif mode == 'copy':\n                top_connect_node = shuffle_start_node\n            node_x = top_connect_node.xpos() \n            node_y = top_connect_node.ypos() + 100\n            node_m_x = node_x\n            \n            if mode == 'copy':\n\n                # Iterate through each layer in the selected_aovs list\n                for idx, layer_name in enumerate(self.selected_aovs, start=1):\n                    # Create Shuffle node\n                    shuffle_node = nuke.nodes.ShuffleCopy()\n                    shuffle_node.setXpos(node_x)\n                    shuffle_node.setYpos(node_y)\n                    shuffle_node\[\"in\"].setValue(layer_name)\n                    shuffle_node\[\"in2\"].setValue(\"rgb\")\n                    shuffle_node\[\"alpha\"].setValue(\"alpha2\")\n                    shuffle_node\[\"black\"].setValue(\"red\")\n                    shuffle_node\[\"white\"].setValue(\"green\")\n                    shuffle_node\[\"red2\"].setValue(\"blue\")\n                    shuffle_node\[\"out\"].setValue(\"rgb\")\n                    shuffle_node\[\"out2\"].setValue(layer_name)\n                    \n                    # Create Merge node\n                    merge_node = nuke.nodes.Merge2()\n                    merge_node.setInput(0, input2_node) \n                    merge_node.setInput(1, input2_node) \n                    merge_node\['operation'].setValue('plus')  # Set operation to 'plus'\n                    merge_node\['Achannels'].setValue('rgb')  # Set A channels to 'rgb'\n                    merge_node\['Bchannels'].setValue(layer_name)  # Set B channels to layer name\n                    merge_node\['output'].setValue(layer_name)  # Set output to layer name\n                    merge_node.setXpos(node_m_x-200)\n                    merge_node.setYpos(node_y)\n                    shuffle_node.setInput(0, top_connect_node) \n                    shuffle_node.setInput(1, merge_node)  \n                    top_connect_node=shuffle_node\n                    \n                    \n                    # Position nodes\n                    node_y += 200\n                    node_m_x += -30\n                    \n                    # Connect nodes\n                    #merge_node.setInput(1, shuffle_node)\n\n                # Connect the last Shuffle node to the group output\n                output_node.setInput(0, top_connect_node)\n\n            else:\n                # Create shuffle nodes for each layer\n                shuffle_nodes = \[]\n                last_connect_nodes = \[]\n                for layer_name in layer_names:\n                    # Create shuffle node\n                    shuffle_node = nuke.createNode('Shuffle', inpanel=False)\n                    shuffle_node.setInput(0, None)  \n                    shuffle_node\['in'].setValue(layer_name)  # Set shuffle layer\n                    shuffle_node\['out'].setValue('rgb')\n                    shuffle_node.setXYpos(node_x, node_y)\n                    node_x += 100  # Increment x position for the next node\n                    \n                    # Connect shuffle node input to 'AddBase' node\n                    shuffle_node.setInput(0, top_connect_node )\n                    #shuffle_nodes.append(shuffle_node)\n\n                    #last connect\n                    last_connect = shuffle_node\n                    if mode == 'add':\n                        last_connect_nodes.append(shuffle_node)\n\n                    if mode == 'div':\n\n                        # Create the expression node\n                        exp_node = nuke.createNode('Expression', inpanel=False)\n\n                        # Set Expression knob values\n                        exp_node\['temp_name0'].setValue('div_r')\n                        exp_node\['temp_expr0'].setValue('(rgba.red)/(basecolor_temp.red)')\n                        exp_node\['temp_name1'].setValue('div_g')\n                        exp_node\['temp_expr1'].setValue('(rgba.green)/(basecolor_temp.green)')\n                        exp_node\['temp_name2'].setValue('div_b')\n                        exp_node\['temp_expr2'].setValue('(rgba.blue)/(basecolor_temp.blue)')\n                        exp_node\['temp_name3'].setValue('div_a')\n                        exp_node\['temp_expr3'].setValue('rgba.alpha/a')\n                        exp_node\['expr0'].setValue('(isnan(div_r) || isinf(div_r)) ? 0 : div_r')\n                        exp_node\['expr1'].setValue('(isnan(div_g) || isinf(div_g)) ? 0 : div_g')\n                        exp_node\['expr2'].setValue('(isnan(div_b) || isinf(div_b)) ? 0 : div_b')\n                        exp_node\['expr3'].setValue('(isnan(div_a) || isinf(div_a)) ? 0 : div_a')\n                        # Set other knob values\n                        exp_node\['tile_color'].setValue(0x3f3f3fff)\n                        exp_node\['label'].setValue('\\n')\n                        exp_node\['note_font_color'].setValue(0xffff00ff)\n                        exp_node\['selected'].setValue(True)\n                        exp_node.setInput(0, last_connect)\n                        last_connect = exp_node\n\n                        # Create Shuffle node\n                        shuffle_node = nuke.createNode('Shuffle', inpanel=False)\n                        shuffle_node.setInput(0, None)  # Disconnect input\n                        shuffle_node\['in'].setValue('rgb')\n                        shuffle_node\['alpha'].setValue('black')\n                        shuffle_node\['out'].setValue(layer_name)  \n                        shuffle_node\['selected'].setValue(True)\n                        shuffle_node.setInput(0, last_connect)\n                        last_connect = shuffle_node\n\n                        # Create Remove node\n                        remove_node = nuke.createNode('Remove', inpanel=False)\n                        remove_node.setInput(0, None)  # Disconnect input\n                        remove_node\['operation'].setValue('keep')\n                        remove_node\['channels'].setValue(layer_name)  \n                        remove_node\['channels2'].setValue('rgb')\n                        remove_node\['selected'].setValue(True)\n                        remove_node.setInput(0, last_connect)\n                        last_connect = remove_node\n                        last_connect_nodes.append(last_connect)\n                \n                \n                # Create merge node to combine shuffle outputs\n                merge_node = nuke.createNode('Merge2', inpanel=False)\n                merge_node.setInput(0, None)  # Disconnect input\n                merge_node.setXYpos(last_connect.xpos(), last_connect.ypos()+100)\n                \n                # Set merge node operation to plus\n                merge_node\['operation'].setValue('plus')\n                \n                # Connect merge node to 'Output1' node\n                output_node = self.shuffle_add_group.node('Output1')\n                output_node.setInput(0, merge_node)\n                \n                # Connect shuffle nodes to merge node inputs A and B\n                merge_input_index = 0  # Start with input index 0\n                for last_connect_node in last_connect_nodes:\n                    if merge_input_index == 2:  # Skip index 2\n                        merge_input_index += 1\n                    merge_node.setInput(merge_input_index, last_connect_node)\n                    merge_input_index += 1  # Increment input index\n\n\n# Create and show the layer selector window\ngroup = nuke.thisNode()\nif not group.input(0):\n nuke.message('err.. No Inputs')\nelse:\n Grade_AOVS = Grade_AOVS()\n Grade_AOVS.show()\n"}
+ addUserKnob {26 txt_1 l "" -STARTLINE T " "}
+ addUserKnob {26 layers_used l " " t "These are the AOV that will be graded together. An AOV in brackets is the AOV used to divide the other AOV. i.e. basecolour" -STARTLINE T "<b>diffuse_direct, diffuse_indirect (albedo)"}
+ addUserKnob {41 solo T Switch3.solo}
+ addUserKnob {41 mute -STARTLINE T Switch3.mute}
+ addUserKnob {41 contact -STARTLINE T Switch3.contact}
+ addUserKnob {26 txt l " " T (}
+ addUserKnob {41 divide_by_texture l "divide by " -STARTLINE T Switch4645654.divide_by_texture}
+ addUserKnob {41 grade_chans l "Grade Channels )" -STARTLINE T CopyGradedAOV.grade_chans}
+ addUserKnob {26 spacetxt l "                                                                                         " -STARTLINE T " "}
+ addUserKnob {26 ""}
+ addUserKnob {41 blackpoint T Grade273535.blackpoint}
+ addUserKnob {41 whitepoint T Grade273535.whitepoint}
+ addUserKnob {41 black l lift T Grade273535.black}
+ addUserKnob {41 white l gain T Grade273535.white}
+ addUserKnob {41 multiply T Grade273535.multiply}
+ addUserKnob {41 add l offset T Grade273535.add}
+ addUserKnob {41 gamma T Grade273535.gamma}
+ addUserKnob {41 reverse T Grade273535.reverse}
+ addUserKnob {41 black_clamp l "black clamp" -STARTLINE T Grade273535.black_clamp}
+ addUserKnob {41 white_clamp l "white clamp" -STARTLINE T Grade273535.white_clamp}
+ addUserKnob {26 text2 l "mix luminance" T " "}
+ addUserKnob {41 enable_mix_luminance l "" -STARTLINE T Grade273535.enable_mix_luminance}
+ addUserKnob {41 mix_luminance l "" -STARTLINE T Grade273535.mix_luminance}
+ addUserKnob {26 "" l "  "}
+ addUserKnob {41 contrast_value l contrast T Gamma1.contrast_value}
+ addUserKnob {41 pivot -STARTLINE T Add_grey.pivot}
+ addUserKnob {41 saturation T ColorCorrect6.saturation}
+ addUserKnob {26 text3 l "mix luminance" T " "}
+ addUserKnob {41 enable_mix_luminance_1 l "" -STARTLINE T ColorCorrect6.enable_mix_luminance}
+ addUserKnob {41 mix_luminance_1 l "" -STARTLINE T ColorCorrect6.mix_luminance}
+ addUserKnob {26 ""}
+ addUserKnob {41 maskChannel l "mask channel" t "if the mask input is unplugged then the input channel can be used" T Keymix3.maskChannel}
+ addUserKnob {41 invertMask l invert -STARTLINE T Keymix3.invertMask}
+ addUserKnob {26 ""}
+ addUserKnob {41 alpha l "(un)premult by" T Unpremult13535.alpha}
+ addUserKnob {41 mixBlend l mix T Blend1.mixBlend}
+ addUserKnob {22 NodeExpCopy l "Node Exp Copy" -STARTLINE T "knobsList = \[\"blackpoint\", \"whitepoint\", \"black\", \"white\", \"multiply\", \"add\", \"gamma\", \"reverse\", \"black_clamp\", \"white_clamp\", \"enable_mix_luminance\", \"mix_luminance\", \"value\", \"grey\", \"saturation\",\n \"enable_mix_luminance_1\", \"mix_luminance_1\", \"alpha\", \"mixBlend\"]\nnukescripts.clear_selection_recursive()\nn = nuke.thisNode()\nn\['selected'].setValue(True)\nwith nuke.root():\n nuke.nodeCopy(\"%clipboard%\")\n nuke.nodePaste(\"%clipboard%\")\n new_node = nuke.selectedNode()\n\n for j in new_node.knobs():\n\n  if j in  knobsList:\n   if isinstance(new_node.knob(j), nuke.Array_Knob):\n     new_node\[j].setSingleValue(False)\n   new_node\[j].setExpression( n.name() + '.' + j )\n\n\n"}
+ addUserKnob {20 Info}
+ addUserKnob {22 documentation l " Documentation / Feedback " T "import webbrowser\nwebbrowser.open(\"https://github.com/vfxwiki/gradeAOVS/wiki/gradeAOVS-DOCS\")" +STARTLINE}
+ addUserKnob {26 ""}
+ addUserKnob {26 version l version: T "v0.1 24/04/24"}
+ addUserKnob {26 created l created: T "24/04/24 by <a href='https://movingimagearts.com'> Rafal Kaniewski</a> - forked from: <a href='https://github.com/vfxwiki/gradeAOV/'> Github.com</a>"}
+ addUserKnob {26 modified l "modified: " T ""}
+ addUserKnob {26 source l source: T "<a href='https://github.com/vfxwiki/gradeAOVS/'> Github.com</a>"}
+ addUserKnob {26 licence l licence: T "<a href=\"https://github.com/openNuke/toolset/blob/master/LICENCE\">READ ME</a>"}
+}
+ Input {
+  inputs 0
+  name Input
+  xpos -260
+  ypos -1377
+ }
+set Nae4c2400 [stack 0]
+ Dot {
+  name Dot8
+  xpos -1326
+  ypos -1374
+ }
+ Dot {
+  name Dot5
+  xpos -1326
+  ypos 114
+ }
+set Nae4c2c00 [stack 0]
+ Dot {
+  name Dot9
+  xpos -1326
+  ypos 210
+ }
+ LayerContactSheet {
+  width {{width*6}}
+  height {{height*6}}
+  showLayerNames true
+  name LayerContactSheet1
+  xpos -591
+  ypos 207
+ }
+push $Nae4c2400
+ Dot {
+  name Dot1
+  xpos -226
+  ypos -1230
+ }
+set Nae4c3800 [stack 0]
+ Dot {
+  name Dot27
+  xpos -446
+  ypos -1230
+ }
+set Nae4c3c00 [stack 0]
+ Dot {
+  name Dot26
+  xpos -666
+  ypos -1230
+ }
+ Unpremult {
+  channels all
+  name Unpremult13535
+  selected true
+  xpos -700
+  ypos -1144
+  disable {{!alpha}}
+  addUserKnob {20 User}
+ }
+ Dot {
+  name Dot16
+  xpos -666
+  ypos -1062
+ }
+set Nae4e8800 [stack 0]
+ Group {
+  name AddLayers
+  xpos -651
+  ypos -973
+ }
+  Input {
+   inputs 0
+   name Input1
+   xpos -893
+   ypos -430
+  }
+set Nae4e8c00 [stack 0]
+add_layer {diffuse_indirect diffuse_indirect.red diffuse_indirect.green diffuse_indirect.blue}
+  Shuffle {
+   in diffuse_indirect
+   out rgb
+   name Shuffle2
+   xpos -793
+   ypos -330
+  }
+push $Nae4e8c00
+add_layer {diffuse_direct diffuse_direct.red diffuse_direct.green diffuse_direct.blue}
+  Shuffle {
+   in diffuse_direct
+   out rgb
+   name Shuffle1
+   xpos -893
+   ypos -330
+  }
+  Merge2 {
+   inputs 2
+   operation plus
+   name Merge1
+   selected true
+   xpos -793
+   ypos -230
+  }
+  Output {
+   name Output1
+   xpos -892
+   ypos 198
+  }
+ end_group
+set Nae321080 [stack 0]
+push $Nae4c3c00
+ Unpremult {
+  name Unpremult1
+  xpos -480
+  ypos -1138
+  disable {{Unpremult13535.disable}}
+  addUserKnob {20 User}
+ }
+ Merge2 {
+  inputs 2
+  operation from
+  Achannels rgb
+  Bchannels rgb
+  output rgb
+  name From
+  xpos -480
+  ypos -973
+ }
+ Dot {
+  name Dot15
+  tile_color 0x949494ff
+  note_font_size 22
+  note_font_color 0xffffffff
+  xpos -446
+  ypos -918
+ }
+set Nae518800 [stack 0]
+ Dot {
+  name Dot12
+  xpos -1216
+  ypos -918
+ }
+ Dot {
+  name Dot14
+  xpos -1216
+  ypos 162
+ }
+push $Nae4e8800
+add_layer {albedo albedo.red albedo.green albedo.blue}
+add_layer {basecolor_temp basecolor_temp.red basecolor_temp.green basecolor_temp.blue}
+ Shuffle {
+  in albedo
+  out basecolor_temp
+  name ShuffleBaseColour
+  xpos -768
+  ypos -1014
+ }
+set Nae519400 [stack 0]
+ Dot {
+  name Dot18
+  xpos -996
+  ypos -1011
+ }
+ Dot {
+  name Dot17
+  xpos -996
+  ypos -222
+ }
+push $Nae519400
+ Group {
+  name AddLayersAndDiv
+  xpos -759
+  ypos -972
+ }
+  Input {
+   inputs 0
+   name Input1
+   xpos -893
+   ypos -430
+  }
+  Add {
+   channels basecolor_temp
+   value 0.0001
+   name AddBase
+   xpos -893
+   ypos -343
+  }
+set Nae519c00 [stack 0]
+  Shuffle {
+   in diffuse_indirect
+   out rgb
+   name Shuffle3
+   xpos -793
+   ypos -243
+  }
+  Expression {
+   temp_name0 div_r
+   temp_expr0 (rgba.red)/(basecolor_temp.red)
+   temp_name1 div_g
+   temp_expr1 (rgba.green)/(basecolor_temp.green)
+   temp_name2 div_b
+   temp_expr2 (rgba.blue)/(basecolor_temp.blue)
+   temp_name3 div_a
+   temp_expr3 rgba.alpha/a
+   expr0 "(isnan(div_r) || isinf(div_r)) ? 0 : div_r"
+   expr1 "(isnan(div_g) || isinf(div_g)) ? 0 : div_g"
+   expr2 "(isnan(div_b) || isinf(div_b)) ? 0 : div_b"
+   expr3 "(isnan(div_a) || isinf(div_a)) ? 0 : div_a"
+   name Expression2
+   tile_color 0x3f3f3fff
+   label "\n"
+   note_font_color 0xffff00ff
+   xpos -793
+   ypos -219
+  }
+  Shuffle {
+   in rgb
+   alpha black
+   out diffuse_indirect
+   name Shuffle4
+   xpos -793
+   ypos -195
+  }
+  Remove {
+   operation keep
+   channels diffuse_indirect
+   channels2 rgb
+   name Remove2
+   xpos -793
+   ypos -171
+  }
+push $Nae519c00
+  Shuffle {
+   in diffuse_direct
+   out rgb
+   name Shuffle1
+   xpos -893
+   ypos -243
+  }
+  Expression {
+   temp_name0 div_r
+   temp_expr0 (rgba.red)/(basecolor_temp.red)
+   temp_name1 div_g
+   temp_expr1 (rgba.green)/(basecolor_temp.green)
+   temp_name2 div_b
+   temp_expr2 (rgba.blue)/(basecolor_temp.blue)
+   temp_name3 div_a
+   temp_expr3 rgba.alpha/a
+   expr0 "(isnan(div_r) || isinf(div_r)) ? 0 : div_r"
+   expr1 "(isnan(div_g) || isinf(div_g)) ? 0 : div_g"
+   expr2 "(isnan(div_b) || isinf(div_b)) ? 0 : div_b"
+   expr3 "(isnan(div_a) || isinf(div_a)) ? 0 : div_a"
+   name Expression1
+   tile_color 0x3f3f3fff
+   label "\n"
+   note_font_color 0xffff00ff
+  }
+  Shuffle {
+   in rgb
+   alpha black
+   out diffuse_direct
+   name Shuffle2
+  }
+  Remove {
+   operation keep
+   channels diffuse_direct
+   channels2 rgb
+   name Remove1
+  }
+  Merge2 {
+   inputs 2
+   operation plus
+   name Merge1
+   selected true
+   xpos -793
+   ypos -71
+  }
+  Output {
+   name Output1
+   xpos -892
+   ypos 198
+  }
+ end_group
+push $Nae321080
+ Switch {
+  inputs 2
+  which {{divide_by_texture}}
+  name Switch4645654
+  xpos -700
+  ypos -860
+  addUserKnob {20 User}
+  addUserKnob {6 divide_by_texture l "div by txtr" +STARTLINE}
+  divide_by_texture true
+ }
+ Grade {
+  channels all
+  black_clamp false
+  name Grade273535
+  xpos -700
+  ypos -782
+  addUserKnob {20 User}
+  addUserKnob {18 exposure R -1 1}
+  exposure {{multiply==0|white==0|multiply==0?0:log10(multiply)/log10(2)+log10(white)/log10(2)}}
+  addUserKnob {6 exposure_panelDropped l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1_1_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1_1_1_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1_1_1_1_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+  addUserKnob {6 exposure_panelDropped_1_1_1_1_1_1_1_1_1_1_1_1_1_1_1_1 l "panel dropped state" -STARTLINE +HIDDEN}
+ }
+ Dot {
+  name Dot19
+  xpos -666
+  ypos -726
+ }
+set Naf56d000 [stack 0]
+ Dot {
+  name Dot20
+  xpos -759
+  ypos -726
+ }
+ Multiply {
+  value 0
+  name Multiply1
+  xpos -793
+  ypos -695
+ }
+ Add {
+  value {{pivot}}
+  name Add_grey
+  xpos -793
+  ypos -659
+  addUserKnob {20 User}
+  addUserKnob {7 pivot}
+  pivot 0.18
+ }
+ Dot {
+  name Dot22
+  xpos -759
+  ypos -604
+ }
+set Naf5a0000 [stack 0]
+ Dot {
+  name Dot23
+  xpos -759
+  ypos -515
+ }
+push $Naf56d000
+push $Naf5a0000
+ Merge2 {
+  inputs 2
+  operation divide
+  also_merge all
+  name Merge1
+  xpos -700
+  ypos -607
+ }
+ Gamma {
+  value {{1-contrast_value}}
+  name Gamma1
+  xpos -700
+  ypos -574
+  addUserKnob {20 User}
+  addUserKnob {7 contrast_value l contrast R -1 1}
+ }
+ Merge2 {
+  inputs 2
+  operation multiply
+  also_merge all
+  name Multiply
+  xpos -700
+  ypos -518
+ }
+ ColorCorrect {
+  channels all
+  enable_mix_luminance false
+  name ColorCorrect6
+  xpos -700
+  ypos -279
+ }
+set Naf5a1400 [stack 0]
+ Copy {
+  inputs 2
+  channels basecolor_temp
+  name Copy1
+  xpos -742
+  ypos -211
+ }
+set Naf5f2800 [stack 0]
+push $Naf5f2800
+ Merge2 {
+  inputs 2
+  operation multiply
+  Achannels basecolor_temp
+  Bchannels rgb
+  output rgb
+  also_merge rgb
+  name Merge5
+  xpos -742
+  ypos -129
+ }
+push $Naf5a1400
+ Switch {
+  inputs 2
+  which {{parent.Switch4645654.which}}
+  name Switch2
+  xpos -595
+  ypos -129
+ }
+ Dot {
+  name Dot24
+  xpos -561
+  ypos -79
+ }
+set N26d4e000 [stack 0]
+ Dot {
+  name Dot4
+  xpos -1106
+  ypos -79
+ }
+ Dot {
+  name Dot7
+  xpos -1106
+  ypos 162
+ }
+ Dot {
+  name Dot10
+  xpos -446
+  ypos 186
+ }
+ Input {
+  inputs 0
+  name mask
+  label mask
+  xpos 70
+  ypos -1431
+  number 1
+ }
+ Dot {
+  name Dot13
+  xpos 104
+  ypos 114
+ }
+push $Nae4c2c00
+ Dot {
+  name Dot11
+  xpos -446
+  ypos 114
+ }
+set Naf5d6c00 [stack 0]
+ Switch {
+  inputs 2
+  which {{"\[exists parent.input1]"}}
+  name Switch1
+  xpos -150
+  ypos 111
+  disable {{"!\[exists parent.input1]"}}
+ }
+ Invert {
+  name Invert1
+  xpos -150
+  ypos 129
+ }
+push $Naf5d6c00
+push $N26d4e000
+ Dot {
+  name Dot6
+  xpos -561
+  ypos 42
+ }
+ Grade {
+  white 2.28
+  name Grade1
+  xpos -501
+  ypos 39
+ }
+push $Nae4c3800
+ Dot {
+  name Dot2
+  xpos -226
+  ypos -318
+ }
+ Dot {
+  name Dot3
+  xpos -336
+  ypos -318
+ }
+push $N26d4e000
+push $Nae518800
+ Clamp {
+  channels rgb
+  minimum_enable {{Grade273535.black_clamp}}
+  maximum 1e+14
+  maximum_enable {{Grade273535.white_clamp}}
+  name Clamp135345
+  xpos -480
+  ypos -369
+ }
+ Merge2 {
+  inputs 2
+  operation plus
+  Achannels rgb
+  Bchannels rgb
+  output rgb
+  name Merge34
+  xpos -480
+  ypos -82
+ }
+ Premult {
+  alpha {{{Unpremult13535.alpha}}}
+  name Premult435345345
+  xpos -491
+  ypos -43
+  disable {{Unpremult13535.disable}}
+ }
+ Blend {
+  inputs 2
+  channels rgb
+  weight0 {{mixBlend}}
+  weight1 {{1-weight0}}
+  name Blend1
+  xpos -370
+  ypos -34
+  addUserKnob {20 User}
+  addUserKnob {7 mixBlend}
+  mixBlend 1
+ }
+ Group {
+  inputs 2
+  name CopyGradedAOV
+  xpos -370
+  ypos 39
+  disable {{!grade_chans x52 0}}
+  addUserKnob {20 User}
+  addUserKnob {6 divide_by_texture l "div by texr" +STARTLINE}
+  divide_by_texture {{AddLayersAndDiv.use_div}}
+  addUserKnob {6 grade_chans l "Grade Channels )" -STARTLINE}
+ }
+  Input {
+   inputs 0
+   name Input2
+   xpos -754
+   ypos -141
+   number 1
+  }
+set Naf62d000 [stack 0]
+push $Naf62d000
+  Merge2 {
+   inputs 2
+   operation plus
+   Achannels rgb
+   Bchannels diffuse_indirect
+   output diffuse_indirect
+   name Merge2
+   xpos -618
+   ypos 215
+  }
+push $Naf62d000
+push $Naf62d000
+  Merge2 {
+   inputs 2
+   operation plus
+   Achannels rgb
+   Bchannels diffuse_direct
+   output diffuse_direct
+   name Merge1
+   xpos -588
+   ypos 15
+  }
+  Input {
+   inputs 0
+   name Input1
+   selected true
+   xpos -396
+   ypos -134
+  }
+set Naf62c800 [stack 0]
+push $Naf62c800
+  ShuffleCopy {
+   inputs 2
+   in none
+   alpha alpha2
+   name ShuffleCopyStart
+   xpos -388
+   ypos -85
+   addUserKnob {20 User}
+   addUserKnob {6 AlsoGradeChannel l "Also Grade Channel" +STARTLINE}
+   AlsoGradeChannel true
+  }
+  ShuffleCopy {
+   inputs 2
+   in diffuse_direct
+   in2 rgb
+   alpha alpha2
+   black red
+   white green
+   red2 blue
+   out rgb
+   out2 diffuse_direct
+   name ShuffleCopy1
+   xpos -388
+   ypos 15
+  }
+  ShuffleCopy {
+   inputs 2
+   in diffuse_indirect
+   in2 rgb
+   alpha alpha2
+   black red
+   white green
+   red2 blue
+   out rgb
+   out2 diffuse_indirect
+   name ShuffleCopy2
+   xpos -388
+   ypos 215
+  }
+  Output {
+   name Output1
+   xpos -395
+   ypos 631
+  }
+ end_group
+set Nae321b80 [stack 0]
+ Keymix {
+  inputs 3
+  channels rgb
+  maskChannel -rgba.alpha
+  name Keymix3
+  xpos -370
+  ypos 159
+  disable {{!maskChannel}}
+ }
+ Switch {
+  inputs 4
+  which {{contact?3:mute?2:solo?1:0}}
+  name Switch3
+  xpos -370
+  ypos 201
+  addUserKnob {20 User}
+  addUserKnob {4 output M {"rgb graded by channel" "preview channel (solo)" "preview without (mute)" "channel contact sheet" "" "" "" "" ""}}
+  output "preview channel (solo)"
+  addUserKnob {6 solo +STARTLINE}
+  addUserKnob {6 mute -STARTLINE}
+  addUserKnob {6 contact -STARTLINE}
+ }
+ Remove {
+  channels basecolor_temp
+  name Remove1
+  xpos -370
+  ypos 237
+ }
+ Output {
+  name Output1
+  xpos -370
+  ypos 375
+ }
+ ShuffleCopy {
+  inputs 0
+  name ShuffleCopy1
+  xpos 5240
+  ypos -9
+ }
+ ShuffleCopy {
+  inputs 0
+  name ShuffleCopy2
+  xpos 5350
+  ypos -9
+ }
+push $Nae321b80
+ Viewer {
+  frame 45
+  frame_range 1-100
+  channels diffuse_direct
+  monitorOutNDISenderName "NukeX - gradeAOV.v11 - Viewer1"
+  monitorOutOutputTransform rec709
+  name Viewer1
+  xpos 357
+  ypos -1332
+ }
+end_group
