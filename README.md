@@ -3,6 +3,8 @@ Simple subtractive compositing grade tool with extra features like, saturation, 
 * multiple AOVS i.e. Indirect_diffuse and direct_diffuse
 * option of dividing by the albedo
 
+* This is a v0.1 rlease - it has not been production tested. Any feedback would be apreciated. rafal'AT'movingimagearts'DOT'com
+
 # LICENCE 
 By downloading or copying a file from this repository you agree to the general license terms below. Copyright (c) 2010 till present All rights reserved.
 
